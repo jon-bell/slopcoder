@@ -1,4 +1,4 @@
-.PHONY: help all build build-release build-slopagent-musl build-frontend test test-core test-server test-frontend test-frontend-npm appimage clean
+.PHONY: help all build build-release build-slopagent-musl build-frontend test test-core test-server test-frontend test-frontend-npm appimage clean docker-server docker-agent
 
 help:
 	@echo "Targets:"
@@ -13,6 +13,8 @@ help:
 	@echo "  test-frontend   Build frontend (no tests)"
 	@echo "  test-frontend-npm  Run frontend npm tests"
 	@echo "  appimage        Build AppImage package"
+	@echo "  docker-server   Build slopcoder-server Docker image"
+	@echo "  docker-agent    Build slopcoder-agent Docker image"
 	@echo "  clean           Clean Rust and frontend build outputs"
 
 all: build-release build-frontend
@@ -46,6 +48,12 @@ test-frontend-npm:
 
 appimage:
 	./appimage/build.sh
+
+docker-server: build-release build-frontend
+	docker build -f Dockerfile.server -t slopcoder-server:local .
+
+docker-agent: build-slopagent-musl
+	docker build -f Dockerfile.agent -t slopcoder-agent:local .
 
 clean:
 	cargo clean

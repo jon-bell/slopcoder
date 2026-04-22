@@ -2,14 +2,55 @@ name: CI
 
 on:
   push:
+    branches: [main]
+  pull_request:
+
+env:
+  SERVER_IMAGE: ghcr.io/${{ github.repository_owner }}/slopcoder-server
+  AGENT_IMAGE: ghcr.io/${{ github.repository_owner }}/slopcoder-agent
 
 jobs:
   test:
-    runs-on: self-hosted
+    runs-on: ripley-cloud
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Run tests
-        run: cargo test --workspace --features slopcoder-core/test-opencode
-      - name: Build slopagent (musl)
-        run: cargo build --release -p slopagent --target x86_64-unknown-linux-musl
+      - uses: actions/checkout@v4
+      - name: Rust tests
+        run: cargo test --workspace
+      - name: Frontend tests and build
+        run: cd frontend && npm ci && npm run test && npm run build
+
+  build-images:
+    runs-on: ripley-cloud
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build binaries
+        run: |
+          cargo build --release -p slopcoder-server --target x86_64-unknown-linux-musl
+          cargo build --release -p slopagent --target x86_64-unknown-linux-musl
+          cd frontend && npm ci && npm run build
+      - name: Build Docker images
+        run: |
+          docker build -f Dockerfile.server -t slopcoder-server:ci .
+          docker build -f Dockerfile.agent -t slopcoder-agent:ci .
+      - name: Login to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push images
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag slopcoder-server:ci ${{ env.SERVER_IMAGE }}:${{ github.sha }}
+          docker tag slopcoder-server:ci ${{ env.SERVER_IMAGE }}:latest
+          docker tag slopcoder-agent:ci ${{ env.AGENT_IMAGE }}:${{ github.sha }}
+          docker tag slopcoder-agent:ci ${{ env.AGENT_IMAGE }}:latest
+          docker push ${{ env.SERVER_IMAGE }}:${{ github.sha }}
+          docker push ${{ env.SERVER_IMAGE }}:latest
+          docker push ${{ env.AGENT_IMAGE }}:${{ github.sha }}
+          docker push ${{ env.AGENT_IMAGE }}:latest

@@ -1,0 +1,34 @@
+#!/bin/bash
+set -e
+
+# Start SSH server (needs root, skip if not available)
+if [ -x /usr/sbin/sshd ] && [ "$(id -u)" = "0" ]; then
+  /usr/sbin/sshd -D &
+fi
+
+# Start code-server if available
+if command -v code-server &>/dev/null; then
+  code-server \
+    --bind-addr 0.0.0.0:8080 \
+    --auth none \
+    --disable-telemetry \
+    /home/dev/workspace &
+fi
+
+# Run devcontainer lifecycle hooks
+if [ -f /etc/slopcoder/post-create.sh ]; then
+  source /etc/slopcoder/post-create.sh
+fi
+if [ -f /etc/slopcoder/post-start.sh ]; then
+  source /etc/slopcoder/post-start.sh
+fi
+
+# Run setup workflow if configured
+if [ -n "$SLOPCODER_SETUP_WORKFLOW" ] && [ -f "$SLOPCODER_SETUP_WORKFLOW" ]; then
+  slopagent-setup --workflow "$SLOPCODER_SETUP_WORKFLOW"
+fi
+
+# Start slopagent (blocks, reconnects on failure)
+exec slopagent /home/dev/workspace \
+  --server "${SLOPCODER_SERVER:-ws://localhost:8080/agent/connect}" \
+  --name "${WORKSPACE_SLUG:-workspace}"

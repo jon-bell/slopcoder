@@ -1,0 +1,6 @@
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY target/x86_64-unknown-linux-musl/release/slopcoder-server /usr/local/bin/slopcoder-server
+COPY frontend/dist /srv/frontend
+EXPOSE 8080
+ENTRYPOINT ["slopcoder-server", "--static-dir", "/srv/frontend"]

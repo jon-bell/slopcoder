@@ -1,0 +1,23 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-server git bash curl ca-certificates sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd
+
+# Install code-server
+RUN curl -fsSL https://code-server.dev/install.sh | sh
+
+# Create dev user
+RUN useradd -m -s /bin/bash -u 1000 dev \
+    && mkdir -p /home/dev/.ssh /home/dev/workspace \
+    && chown -R dev:dev /home/dev
+
+COPY target/x86_64-unknown-linux-musl/release/slopagent /usr/local/bin/slopagent
+COPY scripts/workspace-init /usr/local/bin/workspace-init
+RUN chmod +x /usr/local/bin/workspace-init
+
+EXPOSE 8080 22
+USER dev
+WORKDIR /home/dev/workspace
+ENTRYPOINT ["/usr/local/bin/workspace-init"]
