@@ -70,7 +70,7 @@ jobs:
       - name: Frontend tests and build
         run: cd frontend && npm ci && npm run test && npm run build
 
-  build-images:
+  build-and-e2e:
     runs-on: ripley-cloud
     needs: test
     steps:
@@ -124,51 +124,55 @@ jobs:
             sudo apt-get install -y nodejs
           fi
 
-      - name: Build binaries and images
+      - name: Build binaries
         run: |
           cargo build --release -p slopcoder-server --target x86_64-unknown-linux-musl
           cargo build --release -p slopagent --target x86_64-unknown-linux-musl
-          cd frontend && npm ci && npm run build && cd ..
+          cd frontend && npm ci && npm run build
+
+      - name: Build Docker images
+        run: |
           docker build -f Dockerfile.server -t slopcoder-server:ci .
           docker build -f Dockerfile.agent -t slopcoder-agent:ci .
 
-  e2e:
-    runs-on: ripley-cloud
-    needs: build-images
-    steps:
-      - uses: actions/checkout@v4
       - name: Install docker compose plugin
         run: |
           sudo mkdir -p /usr/local/lib/docker/cli-plugins
           sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
             -o /usr/local/lib/docker/cli-plugins/docker-compose
           sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
       - name: Start system
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait --wait-timeout 60
+
       - name: Wait for coordinator
         run: |
           for i in $(seq 1 30); do
             if curl -sf http://localhost:8080/auth/me 2>/dev/null; then break; fi
             sleep 1
           done
+
       - name: Run E2E tests
         run: ./e2e/run.sh
+
       - name: Collect logs on failure
         if: failure()
         run: docker compose logs > e2e-logs.txt
+
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs
           path: e2e-logs.txt
+
       - name: Teardown
         if: always()
         run: docker compose down -v
 
   push-images:
     runs-on: ripley-cloud
-    needs: e2e
+    needs: build-and-e2e
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
