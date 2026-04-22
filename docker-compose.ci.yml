@@ -1,0 +1,9 @@
+services:
+  coordinator:
+    image: slopcoder-server:ci
+    build: !reset null
+  agent-1:
+    image: slopcoder-agent:ci
+    build: !reset null
+  code-server:
+    profiles: ["demo-only"]
