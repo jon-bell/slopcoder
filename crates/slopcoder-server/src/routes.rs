@@ -118,6 +118,17 @@ fn auth_routes(
         .and(with_state(state.clone()))
         .and_then(handle_dev_login);
 
+    let login = warp::path("login")
+        .and(warp::get())
+        .and(with_state(state.clone()))
+        .and_then(handle_github_login);
+
+    let callback = warp::path("callback")
+        .and(warp::get())
+        .and(warp::query::<OAuthCallbackQuery>())
+        .and(with_state(state.clone()))
+        .and_then(handle_github_callback);
+
     let me = warp::path("me")
         .and(warp::get())
         .and(warp::header::optional::<String>("cookie"))
@@ -128,7 +139,7 @@ fn auth_routes(
         .and(warp::post().or(warp::get()).unify())
         .and_then(handle_logout);
 
-    dev_login.or(me).or(logout)
+    dev_login.or(login).or(callback).or(me).or(logout)
 }
 
 #[derive(Deserialize)]
@@ -193,6 +204,150 @@ async fn handle_dev_login(
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .into_response()),
+    }
+}
+
+#[derive(Deserialize)]
+struct OAuthCallbackQuery {
+    code: String,
+}
+
+async fn handle_github_login(state: AppState) -> Result<impl Reply, Infallible> {
+    let Some(client_id) = state.github_client_id() else {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&ErrorResponse { error: "GitHub OAuth not configured".to_string() }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ).into_response());
+    };
+    let url = format!(
+        "https://github.com/login/oauth/authorize?client_id={}&scope=read:org%20read:user",
+        client_id
+    );
+    Ok(warp::reply::with_header(
+        warp::reply::with_status(warp::reply::json(&serde_json::json!({})), StatusCode::FOUND),
+        "location",
+        url,
+    ).into_response())
+}
+
+async fn handle_github_callback(
+    query: OAuthCallbackQuery,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    let (Some(client_id), Some(client_secret)) = (state.github_client_id(), state.github_client_secret()) else {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&ErrorResponse { error: "GitHub OAuth not configured".to_string() }),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ).into_response());
+    };
+
+    let http = reqwest::Client::new();
+
+    // Exchange code for access token
+    let token_resp = http
+        .post("https://github.com/login/oauth/access_token")
+        .header("accept", "application/json")
+        .json(&serde_json::json!({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": query.code,
+        }))
+        .send()
+        .await;
+
+    let access_token = match token_resp {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(body) => match body.get("access_token").and_then(|v| v.as_str()) {
+                Some(token) => token.to_string(),
+                None => {
+                    let err = body.get("error_description").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&ErrorResponse { error: format!("GitHub OAuth failed: {}", err) }),
+                        StatusCode::BAD_REQUEST,
+                    ).into_response());
+                }
+            },
+            Err(e) => return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse { error: format!("Failed to parse token response: {}", e) }),
+                StatusCode::BAD_GATEWAY,
+            ).into_response()),
+        },
+        Err(e) => return Ok(warp::reply::with_status(
+            warp::reply::json(&ErrorResponse { error: format!("Failed to exchange code: {}", e) }),
+            StatusCode::BAD_GATEWAY,
+        ).into_response()),
+    };
+
+    // Fetch user profile
+    let user_resp = http
+        .get("https://api.github.com/user")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", "slopcoder-server")
+        .send()
+        .await;
+
+    let (username, github_id, avatar_url) = match user_resp {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(body) => (
+                body.get("login").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                body.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+                body.get("avatar_url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            ),
+            Err(_) => return Ok(warp::reply::with_status(
+                warp::reply::json(&ErrorResponse { error: "Failed to parse user profile".to_string() }),
+                StatusCode::BAD_GATEWAY,
+            ).into_response()),
+        },
+        Err(e) => return Ok(warp::reply::with_status(
+            warp::reply::json(&ErrorResponse { error: format!("Failed to fetch user: {}", e) }),
+            StatusCode::BAD_GATEWAY,
+        ).into_response()),
+    };
+
+    // Fetch org memberships
+    let orgs = match http
+        .get("https://api.github.com/user/orgs")
+        .header("authorization", format!("Bearer {}", access_token))
+        .header("user-agent", "slopcoder-server")
+        .send()
+        .await
+    {
+        Ok(resp) => resp.json::<Vec<serde_json::Value>>().await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|o| o.get("login").and_then(|v| v.as_str()).map(String::from))
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    let claims = JwtClaims {
+        sub: username,
+        github_id,
+        orgs,
+        teams: Vec::new(),
+        avatar_url,
+        exp: (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize,
+    };
+
+    match claims.encode(state.jwt_secret()) {
+        Ok(token) => {
+            let cookie = format!(
+                "slopcoder_session={}; HttpOnly; Path=/; SameSite=Lax; Max-Age=86400",
+                token
+            );
+            // Redirect to app root after successful login
+            let mut resp = warp::reply::with_header(
+                warp::reply::with_status(warp::reply::json(&serde_json::json!({})), StatusCode::FOUND),
+                "set-cookie",
+                cookie,
+            ).into_response();
+            resp.headers_mut().insert("location", "/".parse().unwrap());
+            Ok(resp)
+        }
+        Err(_) => Ok(warp::reply::with_status(
+            warp::reply::json(&ErrorResponse { error: "Failed to create session".to_string() }),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ).into_response()),
     }
 }
 
@@ -1540,6 +1695,10 @@ async fn check_api_auth(
                 return Ok(());
             }
         }
+    }
+    // If GitHub OAuth is configured, JWT is required (no password fallback for browsers)
+    if state.github_oauth_configured() {
+        return Err(warp::reject::custom(AuthError));
     }
     // Fall back to password auth
     let required = state.get_ui_auth_password().await;

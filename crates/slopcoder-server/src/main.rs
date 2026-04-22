@@ -23,6 +23,8 @@ struct ServerCli {
     list_request_timeout_secs: u64,
     dev_mode: bool,
     data_dir: std::path::PathBuf,
+    github_client_id: Option<String>,
+    github_client_secret: Option<String>,
 }
 
 fn parse_cli_args<I>(args: I) -> ServerCli
@@ -43,6 +45,8 @@ where
         data_dir: std::env::var("SLOPCODER_DATA_DIR")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("data")),
+        github_client_id: std::env::var("GITHUB_CLIENT_ID").ok(),
+        github_client_secret: std::env::var("GITHUB_CLIENT_SECRET").ok(),
     };
 
     while let Some(arg) = args.next() {
@@ -82,6 +86,12 @@ where
                 if let Some(value) = args.next() {
                     cli.data_dir = std::path::PathBuf::from(value);
                 }
+            }
+            "--github-client-id" => {
+                cli.github_client_id = args.next();
+            }
+            "--github-client-secret" => {
+                cli.github_client_secret = args.next();
             }
             "-h" | "--help" => {
                 println!(
@@ -173,6 +183,8 @@ async fn main() {
         cli.list_request_timeout_secs,
         cli.dev_mode,
         task_store,
+        cli.github_client_id,
+        cli.github_client_secret,
     );
 
     // Build API routes

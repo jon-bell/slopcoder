@@ -21,6 +21,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 urlencoding = { workspace = true }
 jsonwebtoken = "9"
+reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"

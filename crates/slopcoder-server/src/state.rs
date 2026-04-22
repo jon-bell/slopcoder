@@ -146,6 +146,8 @@ pub struct AppState {
     dev_mode: bool,
     jwt_secret: String,
     task_store: Arc<RwLock<CoordinatorTaskStore>>,
+    github_client_id: Option<String>,
+    github_client_secret: Option<String>,
 }
 
 struct AppStateInner {
@@ -168,6 +170,8 @@ impl AppState {
         list_request_timeout_secs: u64,
         dev_mode: bool,
         task_store: CoordinatorTaskStore,
+        github_client_id: Option<String>,
+        github_client_secret: Option<String>,
     ) -> Self {
         let jwt_secret = if dev_mode {
             "slopcoder-dev-mode-secret".to_string()
@@ -193,6 +197,8 @@ impl AppState {
             dev_mode,
             jwt_secret,
             task_store: Arc::new(RwLock::new(task_store)),
+            github_client_id,
+            github_client_secret,
         }
     }
 
@@ -206,6 +212,18 @@ impl AppState {
 
     pub fn task_store(&self) -> &Arc<RwLock<CoordinatorTaskStore>> {
         &self.task_store
+    }
+
+    pub fn github_client_id(&self) -> Option<&str> {
+        self.github_client_id.as_deref()
+    }
+
+    pub fn github_client_secret(&self) -> Option<&str> {
+        self.github_client_secret.as_deref()
+    }
+
+    pub fn github_oauth_configured(&self) -> bool {
+        self.github_client_id.is_some() && self.github_client_secret.is_some()
     }
 
     pub async fn get_ui_auth_password(&self) -> Option<String> {
@@ -479,7 +497,7 @@ mod tests {
         let store = CoordinatorTaskStore::new(tmp.path().to_path_buf()).await.unwrap();
         // Leak the TempDir so it lives for the test duration
         std::mem::forget(tmp);
-        AppState::new(None, "test-password".to_string(), 15, false, store)
+        AppState::new(None, "test-password".to_string(), 15, false, store, None, None)
     }
 
     #[tokio::test]
