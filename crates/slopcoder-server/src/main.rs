@@ -2,6 +2,7 @@ mod k8s;
 mod persistence;
 mod proxy;
 mod routes;
+mod secrets;
 mod ssh;
 mod state;
 

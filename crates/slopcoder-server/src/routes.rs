@@ -86,9 +86,10 @@ pub fn routes(
     let hosts = warp::path("hosts").and(hosts_routes(state.clone()));
     let environments = warp::path("environments").and(environments_routes(state.clone()));
     let tasks = warp::path("tasks").and(tasks_routes(state.clone()));
+    let secrets = warp::path("secrets").and(secrets_routes(state.clone()));
 
     let api_scoped = auth_filter_api(state.clone())
-        .and(hosts.or(environments).or(tasks))
+        .and(hosts.or(environments).or(tasks).or(secrets))
         .recover(handle_rejection);
     let api_routes = warp::path("api").and(api_scoped);
 
@@ -1296,6 +1297,113 @@ async fn remove_collaborator(
             Ok(warp::reply::json(&collabs).into_response())
         }
         None => Ok(error_reply(StatusCode::NOT_FOUND, "Task not found").into_response()),
+    }
+}
+
+// ============================================================================
+// Secrets routes
+// ============================================================================
+
+fn secrets_routes(
+    state: AppState,
+) -> impl Filter<Extract = (impl Reply,), Error = warp::Rejection> + Clone {
+    let list = warp::path::end()
+        .and(warp::get())
+        .and(warp::header::optional::<String>("cookie"))
+        .and(with_state(state.clone()))
+        .and_then(list_secrets);
+
+    let create = warp::path::end()
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::header::optional::<String>("cookie"))
+        .and(with_state(state.clone()))
+        .and_then(create_secret);
+
+    let delete = warp::path!(String)
+        .and(warp::delete())
+        .and(warp::query::<DeleteSecretQuery>())
+        .and(warp::header::optional::<String>("cookie"))
+        .and(with_state(state))
+        .and_then(delete_secret);
+
+    list.or(create).or(delete)
+}
+
+#[derive(Deserialize)]
+struct CreateSecretRequest {
+    name: String,
+    value: String,
+    #[serde(default)]
+    environment: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteSecretQuery {
+    #[serde(default)]
+    environment: Option<String>,
+}
+
+fn extract_username_from_cookie(cookie_header: &Option<String>, jwt_secret: &str) -> Option<String> {
+    cookie_header
+        .as_deref()
+        .and_then(extract_jwt_from_cookie)
+        .and_then(|token| JwtClaims::decode(&token, jwt_secret).ok())
+        .map(|claims| claims.sub)
+}
+
+async fn list_secrets(
+    cookie_header: Option<String>,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    let Some(username) = extract_username_from_cookie(&cookie_header, state.jwt_secret()) else {
+        return Ok(error_reply(StatusCode::UNAUTHORIZED, "Not authenticated"));
+    };
+    let mgr = crate::secrets::LocalSecretsManager::new(
+        state.task_store().read().await.data_dir().to_path_buf(),
+    );
+    let entries = mgr.list(&username).await;
+    Ok(warp::reply::with_status(warp::reply::json(&entries), StatusCode::OK))
+}
+
+async fn create_secret(
+    body: CreateSecretRequest,
+    cookie_header: Option<String>,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    let Some(username) = extract_username_from_cookie(&cookie_header, state.jwt_secret()) else {
+        return Ok(error_reply(StatusCode::UNAUTHORIZED, "Not authenticated"));
+    };
+    let mgr = crate::secrets::LocalSecretsManager::new(
+        state.task_store().read().await.data_dir().to_path_buf(),
+    );
+    match mgr.set(&username, &body.name, &body.value, body.environment.as_deref()).await {
+        Ok(()) => Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"ok": true})),
+            StatusCode::OK,
+        )),
+        Err(e) => Ok(error_reply(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+async fn delete_secret(
+    name: String,
+    query: DeleteSecretQuery,
+    cookie_header: Option<String>,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    let Some(username) = extract_username_from_cookie(&cookie_header, state.jwt_secret()) else {
+        return Ok(error_reply(StatusCode::UNAUTHORIZED, "Not authenticated"));
+    };
+    let mgr = crate::secrets::LocalSecretsManager::new(
+        state.task_store().read().await.data_dir().to_path_buf(),
+    );
+    match mgr.delete(&username, &name, query.environment.as_deref()).await {
+        Ok(()) => Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({"ok": true})),
+            StatusCode::OK,
+        )),
+        Err(e) => Ok(error_reply(StatusCode::NOT_FOUND, e.to_string())),
     }
 }
 
