@@ -7,22 +7,123 @@ on:
 env:
   SERVER_IMAGE: ghcr.io/${{ github.repository_owner }}/slopcoder-server
   AGENT_IMAGE: ghcr.io/${{ github.repository_owner }}/slopcoder-agent
+  RUSTUP_HOME: /tmp/rustup
+  CARGO_HOME: /tmp/cargo
 
 jobs:
   test:
-    runs-on: ripley-cloud
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev curl git musl-tools
+
+      - name: Cache Rust toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/rustup
+            /tmp/cargo/bin
+            /tmp/cargo/registry
+            /tmp/cargo/git
+          key: rust-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-
+
+      - name: Install Rust
+        run: |
+          if [ ! -f "$CARGO_HOME/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+            "$CARGO_HOME/bin/rustup" target add x86_64-unknown-linux-musl
+          fi
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-build-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('crates/**/*.rs') }}
+          restore-keys: |
+            cargo-build-${{ hashFiles('Cargo.lock') }}-
+            cargo-build-
+
+      - name: Cache Node modules
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: node-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: node-
+
+      - name: Install Node.js
+        run: |
+          if ! command -v node &>/dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+          fi
+
       - name: Rust tests
         run: cargo test --workspace
+
       - name: Frontend tests and build
         run: cd frontend && npm ci && npm run test && npm run build
 
   build-images:
-    runs-on: ripley-cloud
+    runs-on: self-hosted
     needs: test
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev curl git musl-tools
+
+      - name: Cache Rust toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/rustup
+            /tmp/cargo/bin
+            /tmp/cargo/registry
+            /tmp/cargo/git
+          key: rust-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-
+
+      - name: Install Rust
+        run: |
+          if [ ! -f "$CARGO_HOME/bin/cargo" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+            "$CARGO_HOME/bin/rustup" target add x86_64-unknown-linux-musl
+          fi
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-build-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('crates/**/*.rs') }}
+          restore-keys: |
+            cargo-build-${{ hashFiles('Cargo.lock') }}-
+            cargo-build-
+
+      - name: Cache Node modules
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: node-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: node-
+
+      - name: Install Node.js
+        run: |
+          if ! command -v node &>/dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+          fi
+
       - name: Build binaries and images
         run: |
           cargo build --release -p slopcoder-server --target x86_64-unknown-linux-musl
@@ -32,7 +133,7 @@ jobs:
           docker build -f Dockerfile.agent -t slopcoder-agent:ci .
 
   e2e:
-    runs-on: ripley-cloud
+    runs-on: self-hosted
     needs: build-images
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +161,7 @@ jobs:
         run: docker compose down -v
 
   push-images:
-    runs-on: ripley-cloud
+    runs-on: self-hosted
     needs: e2e
     if: github.ref == 'refs/heads/main'
     permissions:

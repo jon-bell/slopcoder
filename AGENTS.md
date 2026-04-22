@@ -1,5 +1,5 @@
 - Ensure you run tests after you conclude all tasks.
 - Don't ever make any tests optional.
 - If you successfully implement a requested feature, commit it.
-- When updating GitHub Actions for a self-hosted runner, assume system dependencies and toolchains are installed.
+- The self-hosted runner uses the default/base ARC image. Install necessary dependencies (Rust, Node.js, etc.) in CI steps and use the `actions/cache` action for toolchains and build artifacts.
 - As you make changes to the code, update the DESIGN.md file to reflect the changes. Do not let it get out of date.
