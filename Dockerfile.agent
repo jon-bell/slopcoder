@@ -1,12 +1,10 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-server git bash curl ca-certificates sudo \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /run/sshd
-
-# Install code-server
-RUN curl -fsSL https://code-server.dev/install.sh | sh
+    openssh-server git bash curl ca-certificates sudo gzip \
+    && mkdir -p /run/sshd \
+    && curl -fsSL https://code-server.dev/install.sh | sh \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create dev user
 RUN useradd -m -s /bin/bash -u 1000 dev \
