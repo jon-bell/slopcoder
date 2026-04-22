@@ -3,6 +3,7 @@
 use crate::state::{AppState, ConnectedAgent, RemoteError, StateError, TerminalEvent};
 use futures::future::join_all;
 use futures::{SinkExt, StreamExt};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use slopcoder_core::{
     agent_rpc::{
@@ -26,6 +27,58 @@ use warp::{Filter, Reply};
 struct AuthError;
 impl warp::reject::Reject for AuthError {}
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct JwtClaims {
+    pub sub: String,
+    pub github_id: u64,
+    pub orgs: Vec<String>,
+    pub teams: Vec<String>,
+    pub avatar_url: String,
+    pub exp: usize,
+}
+
+impl JwtClaims {
+    pub fn new_dev(username: &str) -> Self {
+        Self {
+            sub: username.to_string(),
+            github_id: 0,
+            orgs: vec!["dev".to_string()],
+            teams: vec!["dev".to_string()],
+            avatar_url: String::new(),
+            exp: (chrono::Utc::now() + chrono::Duration::hours(24)).timestamp() as usize,
+        }
+    }
+
+    pub fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
+        encode(
+            &Header::default(),
+            self,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+    }
+
+    pub fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
+        decode::<Self>(
+            token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &Validation::default(),
+        )
+        .map(|data| data.claims)
+    }
+}
+
+fn extract_jwt_from_cookie(cookie_header: &str) -> Option<String> {
+    for cookie in cookie_header.split(';') {
+        let cookie = cookie.trim();
+        if let Some(value) = cookie.strip_prefix("slopcoder_session=") {
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Create all API routes.
 pub fn routes(
     state: AppState,
@@ -39,6 +92,8 @@ pub fn routes(
         .recover(handle_rejection);
     let api_routes = warp::path("api").and(api_scoped);
 
+    let auth_routes = warp::path("auth").and(auth_routes(state.clone()));
+
     let agent_connect = warp::path!("agent" / "connect")
         .and(auth_filter_agent(state.clone()))
         .and(warp::ws())
@@ -47,7 +102,138 @@ pub fn routes(
             ws.on_upgrade(move |socket| handle_agent_socket(socket, state))
         });
 
-    api_routes.or(agent_connect)
+    auth_routes.or(api_routes).or(agent_connect)
+}
+
+// ============================================================================
+// Auth routes
+// ============================================================================
+
+fn auth_routes(
+    state: AppState,
+) -> impl Filter<Extract = (impl Reply,), Error = warp::Rejection> + Clone {
+    let dev_login = warp::path("dev-login")
+        .and(warp::get())
+        .and(warp::query::<DevLoginQuery>())
+        .and(with_state(state.clone()))
+        .and_then(handle_dev_login);
+
+    let me = warp::path("me")
+        .and(warp::get())
+        .and(warp::header::optional::<String>("cookie"))
+        .and(with_state(state.clone()))
+        .and_then(handle_auth_me);
+
+    let logout = warp::path("logout")
+        .and(warp::post().or(warp::get()).unify())
+        .and_then(handle_logout);
+
+    dev_login.or(me).or(logout)
+}
+
+#[derive(Deserialize)]
+struct DevLoginQuery {
+    user: String,
+}
+
+#[derive(Serialize)]
+struct AuthMeResponse {
+    github_user: String,
+    github_id: u64,
+    orgs: Vec<String>,
+    teams: Vec<String>,
+    avatar_url: String,
+}
+
+async fn handle_dev_login(
+    query: DevLoginQuery,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    if !state.dev_mode() {
+        return Ok(warp::reply::with_status(
+            warp::reply::with_header(
+                warp::reply::json(&ErrorResponse {
+                    error: "Dev mode is not enabled".to_string(),
+                }),
+                "content-type",
+                "application/json",
+            ),
+            StatusCode::FORBIDDEN,
+        )
+        .into_response());
+    }
+    let claims = JwtClaims::new_dev(&query.user);
+    match claims.encode(state.jwt_secret()) {
+        Ok(token) => {
+            let cookie = format!(
+                "slopcoder_session={}; HttpOnly; Path=/; SameSite=Lax; Max-Age=86400",
+                token
+            );
+            Ok(warp::reply::with_header(
+                warp::reply::with_status(warp::reply::json(&AuthMeResponse {
+                    github_user: claims.sub,
+                    github_id: claims.github_id,
+                    orgs: claims.orgs,
+                    teams: claims.teams,
+                    avatar_url: claims.avatar_url,
+                }), StatusCode::OK),
+                "set-cookie",
+                cookie,
+            )
+            .into_response())
+        }
+        Err(_) => Ok(warp::reply::with_status(
+            warp::reply::with_header(
+                warp::reply::json(&ErrorResponse {
+                    error: "Failed to create session".to_string(),
+                }),
+                "content-type",
+                "application/json",
+            ),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .into_response()),
+    }
+}
+
+async fn handle_auth_me(
+    cookie_header: Option<String>,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    let claims = cookie_header
+        .as_deref()
+        .and_then(extract_jwt_from_cookie)
+        .and_then(|token| JwtClaims::decode(&token, state.jwt_secret()).ok());
+
+    match claims {
+        Some(claims) => Ok(warp::reply::with_status(
+            warp::reply::json(&AuthMeResponse {
+                github_user: claims.sub,
+                github_id: claims.github_id,
+                orgs: claims.orgs,
+                teams: claims.teams,
+                avatar_url: claims.avatar_url,
+            }),
+            StatusCode::OK,
+        )
+        .into_response()),
+        None => Ok(warp::reply::with_status(
+            warp::reply::json(&ErrorResponse {
+                error: "Not authenticated".to_string(),
+            }),
+            StatusCode::UNAUTHORIZED,
+        )
+        .into_response()),
+    }
+}
+
+async fn handle_logout() -> Result<impl Reply, Infallible> {
+    let cookie = "slopcoder_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0";
+    Ok(warp::reply::with_header(
+        warp::reply::with_status(warp::reply::json(&serde_json::json!({"ok": true})), StatusCode::OK),
+        "set-cookie",
+        cookie,
+    ))
 }
 
 // ============================================================================
@@ -1291,6 +1477,7 @@ fn auth_filter_api(state: AppState) -> impl Filter<Extract = (), Error = warp::R
         .and(with_state(state))
         .and(warp::method())
         .and(warp::header::optional::<String>("x-slopcoder-password"))
+        .and(warp::header::optional::<String>("cookie"))
         .and(raw_query)
         .and_then(check_api_auth)
         .untuple_one()
@@ -1316,11 +1503,21 @@ async fn check_api_auth(
     state: AppState,
     method: Method,
     header_password: Option<String>,
+    cookie_header: Option<String>,
     raw_query: String,
 ) -> Result<(), warp::Rejection> {
     if method == Method::OPTIONS {
         return Ok(());
     }
+    // Check JWT cookie first
+    if let Some(ref cookies) = cookie_header {
+        if let Some(token) = extract_jwt_from_cookie(cookies) {
+            if JwtClaims::decode(&token, state.jwt_secret()).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    // Fall back to password auth
     let required = state.get_ui_auth_password().await;
     if let Some(required) = required {
         let query_password = extract_password_from_query(&raw_query);
@@ -1424,7 +1621,7 @@ async fn request_with_timeout(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_password_from_query;
+    use super::{extract_jwt_from_cookie, extract_password_from_query, JwtClaims};
 
     #[test]
     fn test_extract_password() {
@@ -1438,5 +1635,37 @@ mod tests {
         );
         assert_eq!(extract_password_from_query("foo=bar"), None);
         assert_eq!(extract_password_from_query(""), None);
+    }
+
+    #[test]
+    fn test_jwt_roundtrip() {
+        let secret = "test-secret";
+        let claims = JwtClaims::new_dev("testuser");
+        let token = claims.encode(secret).unwrap();
+        let decoded = JwtClaims::decode(&token, secret).unwrap();
+        assert_eq!(decoded.sub, "testuser");
+        assert_eq!(decoded.github_id, 0);
+        assert_eq!(decoded.orgs, vec!["dev"]);
+    }
+
+    #[test]
+    fn test_jwt_wrong_secret_fails() {
+        let claims = JwtClaims::new_dev("testuser");
+        let token = claims.encode("secret1").unwrap();
+        assert!(JwtClaims::decode(&token, "secret2").is_err());
+    }
+
+    #[test]
+    fn test_extract_jwt_from_cookie() {
+        assert_eq!(
+            extract_jwt_from_cookie("slopcoder_session=abc123; other=val"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            extract_jwt_from_cookie("other=val; slopcoder_session=xyz"),
+            Some("xyz".to_string())
+        );
+        assert_eq!(extract_jwt_from_cookie("other=val"), None);
+        assert_eq!(extract_jwt_from_cookie("slopcoder_session="), None);
     }
 }

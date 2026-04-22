@@ -20,6 +20,7 @@ struct ServerCli {
     explicit_ui_password: Option<String>,
     explicit_agent_password: Option<String>,
     list_request_timeout_secs: u64,
+    dev_mode: bool,
 }
 
 fn parse_cli_args<I>(args: I) -> ServerCli
@@ -36,6 +37,7 @@ where
         explicit_ui_password: None,
         explicit_agent_password: None,
         list_request_timeout_secs: DEFAULT_LIST_REQUEST_TIMEOUT_SECS,
+        dev_mode: std::env::var("SLOPCODER_DEV_MODE").ok().map_or(false, |v| v == "1"),
     };
 
     while let Some(arg) = args.next() {
@@ -68,10 +70,14 @@ where
                     .filter(|value| *value > 0)
                     .unwrap_or(DEFAULT_LIST_REQUEST_TIMEOUT_SECS);
             }
+            "--dev-mode" => {
+                cli.dev_mode = true;
+            }
             "-h" | "--help" => {
                 println!(
-                    "Usage: slopcoder-server [--addr HOST:PORT] [--static-dir PATH] [--password VALUE|--password-prompt|--no-password] [--agent-password VALUE|--agent-password-prompt] [--list-request-timeout-secs SECONDS]\n\
-Defaults: addr=127.0.0.1:8080, static-dir=frontend/dist, UI auth disabled, agent auth enabled with generated startup password, list-request-timeout-secs=15"
+                    "Usage: slopcoder-server [--addr HOST:PORT] [--static-dir PATH] [--password VALUE|--password-prompt|--no-password] [--agent-password VALUE|--agent-password-prompt] [--list-request-timeout-secs SECONDS] [--dev-mode]\n\
+Defaults: addr=127.0.0.1:8080, static-dir=frontend/dist, UI auth disabled, agent auth enabled with generated startup password, list-request-timeout-secs=15\n\
+Dev mode: --dev-mode or SLOPCODER_DEV_MODE=1 enables /auth/dev-login for testing"
                 );
                 std::process::exit(0);
             }
@@ -140,6 +146,7 @@ async fn main() {
         ui_auth_password,
         agent_auth_password,
         cli.list_request_timeout_secs,
+        cli.dev_mode,
     );
 
     // Build API routes

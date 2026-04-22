@@ -428,6 +428,12 @@ Options:\n\
 }
 
 fn prompt_password() -> Option<String> {
+    // Check env var first (for docker-compose / CI)
+    if let Ok(password) = std::env::var("SLOPCODER_AGENT_PASSWORD") {
+        if !password.is_empty() {
+            return Some(password);
+        }
+    }
     print!("Enter slopagent connection password: ");
     let _ = io::stdout().flush();
     let mut input = String::new();

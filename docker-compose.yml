@@ -1,0 +1,56 @@
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8080:8080"
+    command:
+      - slopcoder-server
+      - --static-dir
+      - /srv/frontend
+      - --agent-password
+      - e2e-test-password
+      - --no-password
+      - --dev-mode
+      - --addr
+      - "0.0.0.0:8080"
+    environment:
+      - SLOPCODER_DEV_MODE=1
+
+  agent-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    depends_on:
+      - coordinator
+    environment:
+      - SLOPCODER_AGENT_PASSWORD=e2e-test-password
+      - SLOPCODER_SERVER=ws://coordinator:8080/agent/connect
+      - WORKSPACE_SLUG=demo-workspace
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        mkdir -p /home/dev/workspace &&
+        cd /home/dev/workspace &&
+        git init --initial-branch=main &&
+        git config user.email "test@test.com" &&
+        git config user.name "Test" &&
+        git commit --allow-empty -m "init" &&
+        exec slopagent /home/dev/workspace --server ws://coordinator:8080/agent/connect --name demo-agent
+    volumes:
+      - agent-1-data:/home/dev/workspace
+
+  code-server:
+    image: codercom/code-server:latest
+    depends_on:
+      - agent-1
+    ports:
+      - "8443:8080"
+    command: ["--auth", "none", "--bind-addr", "0.0.0.0:8080", "/home/dev/workspace"]
+    volumes:
+      - agent-1-data:/home/dev/workspace
+
+volumes:
+  agent-1-data:

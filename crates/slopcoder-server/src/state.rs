@@ -142,6 +142,8 @@ pub struct HostInfo {
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<RwLock<AppStateInner>>,
+    dev_mode: bool,
+    jwt_secret: String,
 }
 
 struct AppStateInner {
@@ -162,7 +164,16 @@ impl AppState {
         ui_auth_password: Option<String>,
         agent_auth_password: String,
         list_request_timeout_secs: u64,
+        dev_mode: bool,
     ) -> Self {
+        let jwt_secret = if dev_mode {
+            "slopcoder-dev-mode-secret".to_string()
+        } else {
+            Uuid::new_v4().to_string()
+        };
+        if dev_mode {
+            tracing::warn!("⚠️  DEV MODE ENABLED — authentication is bypassed. Do not use in production.");
+        }
         Self {
             inner: Arc::new(RwLock::new(AppStateInner {
                 ui_auth_password,
@@ -176,7 +187,17 @@ impl AppState {
                 event_channels: HashMap::new(),
                 terminal_channels: HashMap::new(),
             })),
+            dev_mode,
+            jwt_secret,
         }
+    }
+
+    pub fn dev_mode(&self) -> bool {
+        self.dev_mode
+    }
+
+    pub fn jwt_secret(&self) -> &str {
+        &self.jwt_secret
     }
 
     pub async fn get_ui_auth_password(&self) -> Option<String> {
@@ -446,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminals_are_reused_for_task_and_host() {
-        let state = AppState::new(None, "test-password".to_string(), 15);
+        let state = AppState::new(None, "test-password".to_string(), 15, false);
         let task_id = TaskId::new();
 
         let (first_id, first_created) = state.ensure_task_terminal(task_id, "boa").await;
@@ -458,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_binding_is_cleared_when_terminal_closes() {
-        let state = AppState::new(None, "test-password".to_string(), 15);
+        let state = AppState::new(None, "test-password".to_string(), 15, false);
         let task_id = TaskId::new();
 
         let (terminal_id, created) = state.ensure_task_terminal(task_id, "boa").await;
@@ -480,7 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_agent_closes_bound_terminal_sessions() {
-        let state = AppState::new(None, "test-password".to_string(), 15);
+        let state = AppState::new(None, "test-password".to_string(), 15, false);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<PendingResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
