@@ -1,3 +1,4 @@
+mod persistence;
 mod routes;
 mod state;
 
@@ -21,6 +22,7 @@ struct ServerCli {
     explicit_agent_password: Option<String>,
     list_request_timeout_secs: u64,
     dev_mode: bool,
+    data_dir: std::path::PathBuf,
 }
 
 fn parse_cli_args<I>(args: I) -> ServerCli
@@ -38,6 +40,9 @@ where
         explicit_agent_password: None,
         list_request_timeout_secs: DEFAULT_LIST_REQUEST_TIMEOUT_SECS,
         dev_mode: std::env::var("SLOPCODER_DEV_MODE").ok().map_or(false, |v| v == "1"),
+        data_dir: std::env::var("SLOPCODER_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("data")),
     };
 
     while let Some(arg) = args.next() {
@@ -72,6 +77,11 @@ where
             }
             "--dev-mode" => {
                 cli.dev_mode = true;
+            }
+            "--data-dir" => {
+                if let Some(value) = args.next() {
+                    cli.data_dir = std::path::PathBuf::from(value);
+                }
             }
             "-h" | "--help" => {
                 println!(
@@ -142,11 +152,27 @@ async fn main() {
     };
     println!("Slopagent password: {}", agent_auth_password);
 
+    let mut task_store = match persistence::CoordinatorTaskStore::new(cli.data_dir.clone()).await {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::error!("Failed to initialize task store: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let recovered = task_store.recover_crashed_tasks();
+    if !recovered.is_empty() {
+        tracing::warn!("Recovered {} crashed tasks (marked as failed)", recovered.len());
+        if let Err(e) = task_store.save().await {
+            tracing::error!("Failed to save recovered tasks: {}", e);
+        }
+    }
+
     let state = AppState::new(
         ui_auth_password,
         agent_auth_password,
         cli.list_request_timeout_secs,
         cli.dev_mode,
+        task_store,
     );
 
     // Build API routes

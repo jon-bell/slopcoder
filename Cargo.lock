@@ -3329,6 +3329,7 @@ dependencies = [
  "jsonwebtoken",
  "serde",
  "serde_json",
+ "serde_yaml",
  "slopcoder-core",
  "tempfile",
  "thiserror 2.0.17",

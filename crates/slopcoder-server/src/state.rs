@@ -1,5 +1,6 @@
 //! Coordinator state for connected slopagents.
 
+use crate::persistence::CoordinatorTaskStore;
 use chrono::{DateTime, Utc};
 use slopcoder_core::{
     agent_rpc::{AgentEnvelope, AgentRequest, AgentResponse},
@@ -144,6 +145,7 @@ pub struct AppState {
     inner: Arc<RwLock<AppStateInner>>,
     dev_mode: bool,
     jwt_secret: String,
+    task_store: Arc<RwLock<CoordinatorTaskStore>>,
 }
 
 struct AppStateInner {
@@ -165,6 +167,7 @@ impl AppState {
         agent_auth_password: String,
         list_request_timeout_secs: u64,
         dev_mode: bool,
+        task_store: CoordinatorTaskStore,
     ) -> Self {
         let jwt_secret = if dev_mode {
             "slopcoder-dev-mode-secret".to_string()
@@ -189,6 +192,7 @@ impl AppState {
             })),
             dev_mode,
             jwt_secret,
+            task_store: Arc::new(RwLock::new(task_store)),
         }
     }
 
@@ -198,6 +202,10 @@ impl AppState {
 
     pub fn jwt_secret(&self) -> &str {
         &self.jwt_secret
+    }
+
+    pub fn task_store(&self) -> &Arc<RwLock<CoordinatorTaskStore>> {
+        &self.task_store
     }
 
     pub async fn get_ui_auth_password(&self) -> Option<String> {
@@ -459,15 +467,24 @@ fn unique_host_label(base: &str, existing: &HashMap<String, Uuid>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{AppState, PendingResponse, TerminalEvent};
+    use crate::persistence::CoordinatorTaskStore;
     use slopcoder_core::task::TaskId;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::{oneshot, Mutex};
 
+    async fn test_state() -> AppState {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = CoordinatorTaskStore::new(tmp.path().to_path_buf()).await.unwrap();
+        // Leak the TempDir so it lives for the test duration
+        std::mem::forget(tmp);
+        AppState::new(None, "test-password".to_string(), 15, false, store)
+    }
+
     #[tokio::test]
     async fn terminals_are_reused_for_task_and_host() {
-        let state = AppState::new(None, "test-password".to_string(), 15, false);
+        let state = test_state().await;
         let task_id = TaskId::new();
 
         let (first_id, first_created) = state.ensure_task_terminal(task_id, "boa").await;
@@ -479,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_binding_is_cleared_when_terminal_closes() {
-        let state = AppState::new(None, "test-password".to_string(), 15, false);
+        let state = test_state().await;
         let task_id = TaskId::new();
 
         let (terminal_id, created) = state.ensure_task_terminal(task_id, "boa").await;
@@ -501,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_agent_closes_bound_terminal_sessions() {
-        let state = AppState::new(None, "test-password".to_string(), 15, false);
+        let state = test_state().await;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<PendingResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));

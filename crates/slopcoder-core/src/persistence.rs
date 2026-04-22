@@ -406,6 +406,15 @@ mod tests {
             session_id: None,
             created_at: Utc::now(),
             history: vec![PromptRun::new("test prompt".to_string())],
+            owner: String::new(),
+            workspace_slug: String::new(),
+            pod_name: None,
+            ssh_port: None,
+            ssh_command: None,
+            workspace_url: None,
+            app_url: None,
+            http_port: 3000,
+            collaborators: Vec::new(),
         }
     }
 

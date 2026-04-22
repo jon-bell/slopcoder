@@ -11,6 +11,7 @@ tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 warp = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }

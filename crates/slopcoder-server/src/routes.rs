@@ -552,6 +552,21 @@ struct TaskResponse {
     created_at: String,
     worktree_date: Option<String>,
     history: Vec<PromptRunResponse>,
+    // SlopCoderNG fields
+    owner: String,
+    workspace_slug: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pod_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_url: Option<String>,
+    http_port: u16,
+    collaborators: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -587,6 +602,15 @@ impl TaskResponse {
                     success: r.success,
                 })
                 .collect(),
+            owner: task.owner.clone(),
+            workspace_slug: task.workspace_slug.clone(),
+            pod_name: task.pod_name.clone(),
+            ssh_port: task.ssh_port,
+            ssh_command: task.ssh_command.clone(),
+            workspace_url: task.workspace_url.clone(),
+            app_url: task.app_url.clone(),
+            http_port: task.http_port,
+            collaborators: task.collaborators.clone(),
         }
     }
 }

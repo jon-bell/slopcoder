@@ -126,6 +126,38 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     /// History of prompt runs.
     pub history: Vec<PromptRun>,
+    // -- SlopCoderNG fields --
+    /// GitHub username of the task owner.
+    #[serde(default)]
+    pub owner: String,
+    /// Subdomain slug for workspace URLs.
+    #[serde(default)]
+    pub workspace_slug: String,
+    /// Kubernetes pod name when running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_name: Option<String>,
+    /// Allocated SSH port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_port: Option<u16>,
+    /// SSH connection command string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_command: Option<String>,
+    /// code-server URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_url: Option<String>,
+    /// App forwarding URL (www. subdomain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_url: Option<String>,
+    /// Port inside the pod that www. routes to.
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+    /// GitHub usernames granted access by the owner.
+    #[serde(default)]
+    pub collaborators: Vec<String>,
+}
+
+fn default_http_port() -> u16 {
+    3000
 }
 
 impl Task {
@@ -154,6 +186,15 @@ impl Task {
             session_id: None,
             created_at: Utc::now(),
             history: Vec::new(),
+            owner: String::new(),
+            workspace_slug: String::new(),
+            pod_name: None,
+            ssh_port: None,
+            ssh_command: None,
+            workspace_url: None,
+            app_url: None,
+            http_port: 3000,
+            collaborators: Vec::new(),
         }
     }
 

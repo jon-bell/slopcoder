@@ -42,6 +42,16 @@ export interface Task {
   created_at: string;
   worktree_date?: string | null;
   history: PromptRun[];
+  // SlopCoderNG fields
+  owner: string;
+  workspace_slug: string;
+  pod_name?: string | null;
+  ssh_port?: number | null;
+  ssh_command?: string | null;
+  workspace_url?: string | null;
+  app_url?: string | null;
+  http_port: number;
+  collaborators: string[];
 }
 
 export interface CreateTaskRequest {
