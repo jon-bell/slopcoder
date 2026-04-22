@@ -135,15 +135,15 @@ jobs:
           docker build -f Dockerfile.server -t slopcoder-server:ci .
           docker build -f Dockerfile.agent -t slopcoder-agent:ci .
 
-      - name: Install docker compose plugin
+      - name: Install docker-compose
         run: |
-          sudo mkdir -p /usr/local/lib/docker/cli-plugins
           sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
-            -o /usr/local/lib/docker/cli-plugins/docker-compose
-          sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          docker-compose version
 
       - name: Start system
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait --wait-timeout 60
+        run: docker-compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait --wait-timeout 60
 
       - name: Wait for coordinator
         run: |
@@ -157,7 +157,7 @@ jobs:
 
       - name: Collect logs on failure
         if: failure()
-        run: docker compose logs > e2e-logs.txt
+        run: docker-compose logs > e2e-logs.txt
 
       - name: Upload logs
         if: failure()
@@ -168,7 +168,7 @@ jobs:
 
       - name: Teardown
         if: always()
-        run: docker compose down -v
+        run: docker-compose down -v
 
   push-images:
     runs-on: ripley-cloud
