@@ -683,8 +683,24 @@ fn tasks_routes(
     let delete = warp::path!(String)
         .and(warp::delete())
         .and(warp::query::<DeleteTaskQuery>())
-        .and(with_state(state))
+        .and(with_state(state.clone()))
         .and_then(delete_task);
+
+    let list_collaborators = warp::path!(String / "collaborators")
+        .and(warp::get())
+        .and(with_state(state.clone()))
+        .and_then(get_collaborators);
+
+    let add_collaborator = warp::path!(String / "collaborators")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(with_state(state.clone()))
+        .and_then(add_collaborator);
+
+    let remove_collaborator = warp::path!(String / "collaborators" / String)
+        .and(warp::delete())
+        .and(with_state(state))
+        .and_then(remove_collaborator);
 
     list.or(create)
         .or(rename)
@@ -699,6 +715,9 @@ fn tasks_routes(
         .or(merge_status)
         .or(archive)
         .or(delete)
+        .or(list_collaborators)
+        .or(add_collaborator)
+        .or(remove_collaborator)
 }
 
 #[derive(Serialize)]
@@ -1212,6 +1231,71 @@ async fn delete_task(
             "Unexpected response from agent",
         )),
         Err(e) => Ok(error_reply(state_error_status(&e), e.to_string())),
+    }
+}
+
+// ============================================================================
+// Collaborator routes
+// ============================================================================
+
+#[derive(Deserialize)]
+struct AddCollaboratorRequest {
+    username: String,
+}
+
+async fn get_collaborators(id: String, state: AppState) -> Result<impl Reply, Infallible> {
+    let task_id = match parse_task_id(&id) {
+        Ok(id) => id,
+        Err(reply) => return Ok(reply.into_response()),
+    };
+    let store = state.task_store().read().await;
+    match store.get(task_id) {
+        Some(task) => Ok(warp::reply::json(&task.collaborators).into_response()),
+        None => Ok(error_reply(StatusCode::NOT_FOUND, "Task not found").into_response()),
+    }
+}
+
+async fn add_collaborator(
+    id: String,
+    body: AddCollaboratorRequest,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    let task_id = match parse_task_id(&id) {
+        Ok(id) => id,
+        Err(reply) => return Ok(reply.into_response()),
+    };
+    let mut store = state.task_store().write().await;
+    match store.get_mut(task_id) {
+        Some(task) => {
+            if !task.collaborators.contains(&body.username) {
+                task.collaborators.push(body.username);
+            }
+            let collabs = task.collaborators.clone();
+            let _ = store.save().await;
+            Ok(warp::reply::json(&collabs).into_response())
+        }
+        None => Ok(error_reply(StatusCode::NOT_FOUND, "Task not found").into_response()),
+    }
+}
+
+async fn remove_collaborator(
+    id: String,
+    username: String,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    let task_id = match parse_task_id(&id) {
+        Ok(id) => id,
+        Err(reply) => return Ok(reply.into_response()),
+    };
+    let mut store = state.task_store().write().await;
+    match store.get_mut(task_id) {
+        Some(task) => {
+            task.collaborators.retain(|c| c != &username);
+            let collabs = task.collaborators.clone();
+            let _ = store.save().await;
+            Ok(warp::reply::json(&collabs).into_response())
+        }
+        None => Ok(error_reply(StatusCode::NOT_FOUND, "Task not found").into_response()),
     }
 }
 
