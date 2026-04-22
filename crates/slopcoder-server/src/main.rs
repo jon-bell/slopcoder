@@ -177,7 +177,7 @@ async fn main() {
         }
     }
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         ui_auth_password,
         agent_auth_password,
         cli.list_request_timeout_secs,
@@ -186,6 +186,33 @@ async fn main() {
         cli.github_client_id,
         cli.github_client_secret,
     );
+
+    // Authorization config from env vars
+    if let Ok(orgs) = std::env::var("SLOPCODER_ALLOWED_ORGS") {
+        let orgs: Vec<String> = orgs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        if !orgs.is_empty() {
+            tracing::info!("Allowed orgs: {:?}", orgs);
+            // Parse per-org team restrictions: SLOPCODER_ALLOWED_TEAMS_<ORG>=team1,team2
+            let mut teams_map = std::collections::HashMap::new();
+            for org in &orgs {
+                let env_key = format!("SLOPCODER_ALLOWED_TEAMS_{}", org.to_uppercase().replace('-', "_"));
+                if let Ok(teams) = std::env::var(&env_key) {
+                    let teams: Vec<String> = teams.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    if !teams.is_empty() {
+                        tracing::info!("Allowed teams for {}: {:?}", org, teams);
+                        teams_map.insert(org.clone(), teams);
+                    }
+                }
+            }
+            state.set_allowed_orgs(orgs);
+            state.set_allowed_teams(teams_map);
+        }
+    }
+    if let Ok(max) = std::env::var("SLOPCODER_MAX_WORKSPACES_PER_USER") {
+        if let Ok(max) = max.parse::<usize>() {
+            state.set_max_workspaces_per_user(max);
+        }
+    }
 
     // Build API routes
     let api_routes = routes::routes(state);

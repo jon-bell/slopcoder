@@ -320,6 +320,15 @@ async fn handle_github_callback(
         Err(_) => Vec::new(),
     };
 
+    // Check authorization
+    if let Err(reason) = state.check_authorization(&orgs, &[]) {
+        tracing::warn!("Authorization denied for user '{}': {}", username, reason);
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&ErrorResponse { error: reason }),
+            StatusCode::FORBIDDEN,
+        ).into_response());
+    }
+
     let claims = JwtClaims {
         sub: username,
         github_id,

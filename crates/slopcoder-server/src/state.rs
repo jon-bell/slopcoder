@@ -148,6 +148,9 @@ pub struct AppState {
     task_store: Arc<RwLock<CoordinatorTaskStore>>,
     github_client_id: Option<String>,
     github_client_secret: Option<String>,
+    allowed_orgs: Vec<String>,
+    allowed_teams: HashMap<String, Vec<String>>,
+    max_workspaces_per_user: usize,
 }
 
 struct AppStateInner {
@@ -199,6 +202,9 @@ impl AppState {
             task_store: Arc::new(RwLock::new(task_store)),
             github_client_id,
             github_client_secret,
+            allowed_orgs: Vec::new(),
+            allowed_teams: HashMap::new(),
+            max_workspaces_per_user: 5,
         }
     }
 
@@ -224,6 +230,54 @@ impl AppState {
 
     pub fn github_oauth_configured(&self) -> bool {
         self.github_client_id.is_some() && self.github_client_secret.is_some()
+    }
+
+    pub fn set_allowed_orgs(&mut self, orgs: Vec<String>) {
+        self.allowed_orgs = orgs;
+    }
+
+    pub fn set_allowed_teams(&mut self, teams: HashMap<String, Vec<String>>) {
+        self.allowed_teams = teams;
+    }
+
+    pub fn set_max_workspaces_per_user(&mut self, max: usize) {
+        self.max_workspaces_per_user = max;
+    }
+
+    pub fn max_workspaces_per_user(&self) -> usize {
+        self.max_workspaces_per_user
+    }
+
+    /// Check if a user with the given orgs/teams is authorized.
+    /// Returns Ok(()) if authorized, Err(reason) if not.
+    pub fn check_authorization(&self, user_orgs: &[String], user_teams: &[String]) -> Result<(), String> {
+        if self.dev_mode {
+            return Ok(());
+        }
+        if self.allowed_orgs.is_empty() {
+            return Ok(());
+        }
+        for org in &self.allowed_orgs {
+            if !user_orgs.contains(org) {
+                continue;
+            }
+            // User is in this org — check team restrictions
+            if let Some(required_teams) = self.allowed_teams.get(org) {
+                if required_teams.is_empty() {
+                    return Ok(()); // No team restriction for this org
+                }
+                if user_teams.iter().any(|t| required_teams.contains(t)) {
+                    return Ok(());
+                }
+                // User is in org but not in required team — try next org
+            } else {
+                return Ok(()); // No team restriction for this org
+            }
+        }
+        Err(format!(
+            "User is not a member of any allowed org/team. Required orgs: {:?}",
+            self.allowed_orgs
+        ))
     }
 
     pub async fn get_ui_auth_password(&self) -> Option<String> {
@@ -559,5 +613,34 @@ mod tests {
         assert!(matches!(received, TerminalEvent::Closed));
         assert!(state.get_host_for_task(task_id).await.is_none());
         assert!(state.get_task_terminal(task_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_authorization_no_restrictions() {
+        let state = test_state().await;
+        assert!(state.check_authorization(&["myorg".to_string()], &[]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_authorization_org_required() {
+        let mut state = test_state().await;
+        state.set_allowed_orgs(vec!["myorg".to_string()]);
+        assert!(state.check_authorization(&["myorg".to_string()], &[]).is_ok());
+        assert!(state.check_authorization(&["other".to_string()], &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_authorization_team_required() {
+        let mut state = test_state().await;
+        state.set_allowed_orgs(vec!["myorg".to_string()]);
+        let mut teams = HashMap::new();
+        teams.insert("myorg".to_string(), vec!["engineering".to_string()]);
+        state.set_allowed_teams(teams);
+        // In org + correct team
+        assert!(state.check_authorization(&["myorg".to_string()], &["engineering".to_string()]).is_ok());
+        // In org but wrong team
+        assert!(state.check_authorization(&["myorg".to_string()], &["marketing".to_string()]).is_err());
+        // Not in org at all
+        assert!(state.check_authorization(&["other".to_string()], &["engineering".to_string()]).is_err());
     }
 }
