@@ -12,7 +12,7 @@ env:
 
 jobs:
   test:
-    runs-on: self-hosted
+    runs-on: ripley-cloud
     steps:
       - uses: actions/checkout@v4
 
@@ -71,7 +71,7 @@ jobs:
         run: cd frontend && npm ci && npm run test && npm run build
 
   build-images:
-    runs-on: self-hosted
+    runs-on: ripley-cloud
     needs: test
     steps:
       - uses: actions/checkout@v4
@@ -133,7 +133,7 @@ jobs:
           docker build -f Dockerfile.agent -t slopcoder-agent:ci .
 
   e2e:
-    runs-on: self-hosted
+    runs-on: ripley-cloud
     needs: build-images
     steps:
       - uses: actions/checkout@v4
@@ -161,7 +161,7 @@ jobs:
         run: docker compose down -v
 
   push-images:
-    runs-on: self-hosted
+    runs-on: ripley-cloud
     needs: e2e
     if: github.ref == 'refs/heads/main'
     permissions:
