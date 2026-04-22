@@ -1,3 +1,4 @@
+mod k8s;
 mod persistence;
 mod routes;
 mod state;
