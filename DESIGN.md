@@ -212,3 +212,107 @@ Behavior:
 - Rust unit/integration tests cover environment operations, persistence behavior, and task lifecycle.
 - Frontend build runs TypeScript typecheck and Vite build.
 - End-to-end behavior remains host-local on `slopagent`, with coordinator acting as RPC relay.
+
+## 10. SlopCoderNG Extensions
+
+SlopCoderNG extends Slopcoder into a multi-tenant, Kubernetes-native platform.
+The full spec is in `SLOPCODERNG-SPEC.md`. This section documents the implemented modules.
+
+### 10.1 Container Images
+
+- `Dockerfile.server`: debian-slim with musl `slopcoder-server` binary + frontend assets at `/srv/frontend`.
+- `Dockerfile.agent`: debian-slim with `slopagent`, `code-server`, `openssh-server`, `git`. Entrypoint: `workspace-init`.
+- `scripts/workspace-init`: orchestrates sshd, code-server, devcontainer lifecycle hooks, setup workflows, then slopagent.
+- CI builds and pushes both images to GHCR on `ripley-cloud` runner.
+
+### 10.2 Authentication
+
+Implemented in `crates/slopcoder-server/src/routes.rs`.
+
+- `--dev-mode` flag (or `SLOPCODER_DEV_MODE=1`): bypasses GitHub OAuth for local dev and E2E tests.
+- `GET /auth/dev-login?user=<name>`: sets JWT session cookie (dev mode only).
+- `GET /auth/login`: redirects to GitHub OAuth authorize URL.
+- `GET /auth/callback?code=...`: exchanges code for token, fetches user profile + orgs, issues JWT.
+- `GET /auth/me`: returns current user from JWT cookie.
+- `POST /auth/logout`: clears session cookie.
+- JWT claims: `sub` (username), `github_id`, `orgs`, `teams`, `avatar_url`, `exp`.
+- `auth_filter_api` accepts JWT cookie or password header. When GitHub OAuth is configured, JWT is required.
+
+### 10.3 Authorization
+
+Implemented in `crates/slopcoder-server/src/state.rs`.
+
+- `SLOPCODER_ALLOWED_ORGS`: comma-separated list of GitHub orgs.
+- `SLOPCODER_ALLOWED_TEAMS_<ORG>`: per-org team restrictions.
+- `SLOPCODER_MAX_WORKSPACES_PER_USER`: workspace limit (default 5).
+- `check_authorization(orgs, teams)`: verifies user is in an allowed org/team. Dev mode bypasses.
+
+### 10.4 Coordinator Task Store
+
+Implemented in `crates/slopcoder-server/src/persistence.rs`.
+
+- `CoordinatorTaskStore`: YAML-based persistence in `--data-dir` (default `./data`).
+- Coordinator is the source of truth for task metadata (owner, slug, pod_name, ssh_port, etc.).
+- Crash recovery: running tasks marked failed on startup.
+- Task struct extended with: `owner`, `workspace_slug`, `pod_name`, `ssh_port`, `ssh_command`, `workspace_url`, `app_url`, `http_port`, `collaborators`.
+
+### 10.5 Kubernetes Pod Launcher
+
+Implemented in `crates/slopcoder-server/src/k8s.rs`.
+
+- `K8sClient`: auto-detects k8s via `KUBERNETES_SERVICE_HOST`. No-op when not in cluster.
+- `create_workspace()`: creates PVC + Pod + ClusterIP Service.
+- `delete_workspace()`: removes Pod + Service, retains PVC.
+- `workspace_pod_spec()`: generates full Pod spec with code-server, sshd, slopagent, volume mounts.
+- `fetch_github_ssh_keys()`: fetches user's public keys from `github.com/<user>.keys`.
+
+### 10.6 OAuth Reverse Proxy
+
+Implemented in `crates/slopcoder-server/src/proxy.rs`.
+
+- `parse_workspace_host()`: extracts workspace slug from Host header.
+- `<slug>.<WORKSPACE_DOMAIN>` → code-server (port 8080).
+- `www.<slug>.<WORKSPACE_DOMAIN>` → user's app port (configurable, default 3000).
+- `check_workspace_access()`: validates owner or collaborator access.
+- Collaborator CRUD: `GET/POST/DELETE /api/tasks/:id/collaborators`.
+
+### 10.7 SSH Port Allocation
+
+Implemented in `crates/slopcoder-server/src/ssh.rs`.
+
+- `SshPortPool`: allocates unique ports from a configurable range (default 30000-32767).
+- Single hostname `ssh.<SSH_DOMAIN>`, per-workspace port.
+- `ssh_command()`: formats `ssh -p <port> dev@<domain>` for UI display.
+
+### 10.8 User Secrets
+
+Implemented in `crates/slopcoder-server/src/secrets.rs`.
+
+- `LocalSecretsManager`: file-backed YAML storage per user.
+- Global secrets (user-level) and environment-scoped secrets.
+- Merge logic: global first, environment-scoped overrides on collision.
+- API: `POST/GET/DELETE /api/secrets`. Values never returned after creation.
+
+### 10.9 devcontainer.json Support
+
+Implemented in `crates/slopcoder-core/src/devcontainer.rs`.
+
+- Parses `.devcontainer/devcontainer.json`: `image`, `postCreateCommand`, `postStartCommand`, `customizations.vscode.extensions`, `customizations.slopcoder.*`.
+- `ResolvedConfig`: merges platform defaults → user settings → devcontainer.json.
+- SlopCoderNG-specific fields under `customizations.slopcoder`: `agent`, `web_search`, `http_port`, `secrets`, `setup_workflow`.
+
+### 10.10 Launch Workflows
+
+Implemented in `crates/slopcoder-core/src/workflow.rs`.
+
+- Parses `.slopcoder/setup.yml` (GitHub Actions-style subset).
+- `run` steps → shell commands.
+- Curated `uses` steps: `actions/setup-node`, `actions/setup-python`, `actions-rust-lang/setup-rust-toolchain`.
+- Unsupported `uses` → clear error.
+
+### 10.11 E2E Testing
+
+- `e2e/run.sh`: full lifecycle test driven by curl against docker-compose.
+- `docker-compose.yml`: coordinator + agent + code-server for local dev/demo.
+- `docker-compose.ci.yml`: CI overrides using pre-built images.
+- CI pipeline: test → build-images → e2e → push-images (4 stages on `ripley-cloud`).
