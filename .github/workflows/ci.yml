@@ -137,6 +137,12 @@ jobs:
     needs: build-images
     steps:
       - uses: actions/checkout@v4
+      - name: Install docker compose plugin
+        run: |
+          sudo mkdir -p /usr/local/lib/docker/cli-plugins
+          sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
       - name: Start system
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait --wait-timeout 60
       - name: Wait for coordinator
