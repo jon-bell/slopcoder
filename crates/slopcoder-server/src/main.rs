@@ -2,6 +2,7 @@ mod k8s;
 mod persistence;
 mod proxy;
 mod routes;
+mod ssh;
 mod state;
 
 use std::io::{self, Write};
