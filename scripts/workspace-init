@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Clone repo if GIT_CLONE_URL is set and workspace is empty
+if [ -n "${GIT_CLONE_URL:-}" ]; then
+  if [ ! -d /home/dev/workspace/.git ] && [ -z "$(ls -A /home/dev/workspace 2>/dev/null)" ]; then
+    git clone "$GIT_CLONE_URL" /home/dev/workspace
+  fi
+fi
+
 # Start SSH server (needs root, skip if not available)
 if [ -x /usr/sbin/sshd ] && [ "$(id -u)" = "0" ]; then
   /usr/sbin/sshd -D &

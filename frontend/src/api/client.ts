@@ -5,6 +5,8 @@ import type {
   Task,
   CreateTaskRequest,
   CreateTaskResponse,
+  CreateWorkspaceRequest,
+  CreateWorkspaceResponse,
   RenameTaskRequest,
   CreateEnvironmentRequest,
   SendPromptRequest,
@@ -15,31 +17,6 @@ import type {
 
 // Use relative URLs so the app works from any host
 const API_BASE = import.meta.env.VITE_API_URL || "";
-const PASSWORD_STORAGE_KEY = "slopcoderPassword";
-let cachedPassword: string | null =
-  typeof window === "undefined" ? null : window.localStorage.getItem(PASSWORD_STORAGE_KEY);
-
-function setStoredPassword(password: string) {
-  cachedPassword = password;
-  window.localStorage.setItem(PASSWORD_STORAGE_KEY, password);
-}
-
-function clearStoredPassword() {
-  cachedPassword = null;
-  window.localStorage.removeItem(PASSWORD_STORAGE_KEY);
-}
-
-function promptForPassword(): string | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  const password = window.prompt("Enter Slopcoder password:");
-  if (password === null) {
-    return null;
-  }
-  setStoredPassword(password);
-  return password;
-}
 
 function buildHeaders(options?: RequestInit): HeadersInit {
   const headers: Record<string, string> = {
@@ -47,9 +24,6 @@ function buildHeaders(options?: RequestInit): HeadersInit {
   };
   if (options?.headers) {
     Object.assign(headers, options.headers as HeadersInit);
-  }
-  if (cachedPassword) {
-    headers["X-Slopcoder-Password"] = cachedPassword;
   }
   return headers;
 }
@@ -61,11 +35,9 @@ async function fetchJson<T>(url: string, options?: RequestInit, retry = true): P
   });
 
   if (response.status === 401 && retry) {
-    clearStoredPassword();
-    const password = promptForPassword();
-    if (password) {
-      return fetchJson<T>(url, options, false);
-    }
+    // Redirect to GitHub OAuth login
+    window.location.href = `${API_BASE}/auth/login?redirect=${encodeURIComponent(window.location.href)}`;
+    return new Promise(() => {}); // never resolves, page is navigating
   }
 
   if (!response.ok) {
@@ -111,6 +83,13 @@ export async function getTask(id: string): Promise<Task> {
 
 export async function createTask(req: CreateTaskRequest): Promise<CreateTaskResponse> {
   return fetchJson("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function createWorkspace(req: CreateWorkspaceRequest): Promise<CreateWorkspaceResponse> {
+  return fetchJson("/api/workspaces", {
     method: "POST",
     body: JSON.stringify(req),
   });
@@ -186,8 +165,7 @@ export function subscribeToTask(
   // Build WebSocket URL from current location
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${protocol}//${window.location.host}`;
-  const passwordQuery = cachedPassword ? `?password=${encodeURIComponent(cachedPassword)}` : "";
-  const ws = new WebSocket(`${wsUrl}/api/tasks/${taskId}/stream${passwordQuery}`);
+  const ws = new WebSocket(`${wsUrl}/api/tasks/${taskId}/stream`);
   let closedByClient = false;
 
   ws.onmessage = (event) => {
@@ -230,8 +208,7 @@ export function subscribeToTerminal(
 ): TerminalSession {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${protocol}//${window.location.host}`;
-  const passwordQuery = cachedPassword ? `?password=${encodeURIComponent(cachedPassword)}` : "";
-  const ws = new WebSocket(`${wsUrl}/api/tasks/${taskId}/terminal${passwordQuery}`);
+  const ws = new WebSocket(`${wsUrl}/api/tasks/${taskId}/terminal`);
   ws.binaryType = "arraybuffer";
   let closedByClient = false;
 

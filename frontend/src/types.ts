@@ -69,6 +69,20 @@ export interface CreateTaskResponse {
   worktree_path: string;
 }
 
+export interface CreateWorkspaceRequest {
+  repo_url: string;
+  name?: string;
+  agent?: AgentKind;
+  prompt: string;
+  use_worktree?: boolean;
+}
+
+export interface CreateWorkspaceResponse {
+  workspace_slug: string;
+  task_id: string;
+  workspace_url: string;
+}
+
 export interface RenameTaskRequest {
   name: string;
 }

@@ -14,6 +14,7 @@ import {
   createEnvironment,
   listTasks,
   createTask,
+  createWorkspace,
   getTask,
   getTaskOutput,
   sendPrompt,
@@ -44,6 +45,7 @@ import { shouldFinalizeInitialTaskScroll } from "../utils/taskTranscriptScroll";
 
 type RightMode =
   | { kind: "new-environment" }
+  | { kind: "new-workspace" }
   | { kind: "new-task"; host: string; environment: string }
   | { kind: "task"; taskId: string };
 
@@ -982,6 +984,80 @@ function NewTaskPane(props: {
   );
 }
 
+function NewWorkspacePane(props: {
+  onCreated: (taskId: string) => void;
+}) {
+  const [repoUrl, setRepoUrl] = createSignal("");
+  const [name, setName] = createSignal("");
+  const [agent, setAgent] = createSignal<AgentKind>("claude");
+  const [prompt, setPrompt] = createSignal("");
+  const [useWorktree, setUseWorktree] = createSignal(false);
+  const [loading, setLoading] = createSignal(false);
+  const [status, setStatus] = createSignal("");
+  const [error, setError] = createSignal("");
+
+  const submit = async (e: Event) => {
+    e.preventDefault();
+    if (!repoUrl().trim() || !prompt().trim()) return;
+    setLoading(true);
+    setError("");
+    setStatus("Creating workspace pod...");
+    try {
+      const result = await createWorkspace({
+        repo_url: repoUrl().trim(),
+        name: name().trim() || undefined,
+        prompt: prompt(),
+        use_worktree: useWorktree(),
+        agent: agent(),
+      });
+      props.onCreated(result.task_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create workspace");
+    } finally {
+      setLoading(false);
+      setStatus("");
+    }
+  };
+
+  return (
+    <form onSubmit={submit} class="h-full flex flex-col min-h-0">
+      <div class="flex-1 min-h-0 flex items-center justify-center">
+        <div class="text-center">
+          <div class="text-4xl font-extrabold tracking-tight text-gray-900 dark:text-gray-100">
+            New Workspace
+          </div>
+          <div class="text-sm text-gray-500 dark:text-gray-400 mt-2">
+            Launch a workspace from a Git repository
+          </div>
+        </div>
+      </div>
+      <div class="mt-4">
+        <Show when={error()}>
+          <div class="mb-3 p-3 bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-200 rounded-lg text-sm">{error()}</div>
+        </Show>
+        <div class="grid gap-3 md:grid-cols-3 mb-3">
+          <input value={repoUrl()} onInput={(e) => setRepoUrl(e.currentTarget.value)} placeholder="Git repo URL (https://...)" class="rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100" />
+          <input value={name()} onInput={(e) => setName(e.currentTarget.value)} placeholder="Workspace name (optional)" class="rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100" />
+          <select value={agent()} onChange={(e) => setAgent(e.currentTarget.value as AgentKind)} class="rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100">
+            <option value="claude">Claude</option>
+            <option value="codex">Codex</option>
+            <option value="cursor">Cursor</option>
+            <option value="gemini">Gemini</option>
+          </select>
+        </div>
+        <label class="mb-3 flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+          <input type="checkbox" checked={useWorktree()} onChange={(e) => setUseWorktree(e.currentTarget.checked)} />
+          Run in isolated worktree (mergeable)
+        </label>
+        <textarea value={prompt()} onInput={(e) => setPrompt(e.currentTarget.value)} placeholder="What should the agent do?" rows={4} class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 resize-none mb-3" />
+        <button type="submit" disabled={!repoUrl().trim() || !prompt().trim() || loading()} class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+          {loading() ? status() || "Creating..." : "Create Workspace"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function NewEnvironmentPane(props: {
   hosts: string[];
   onCreated: (taskId: string) => void;
@@ -1145,7 +1221,7 @@ export default function Workspace() {
   const [expanded, setExpanded] = createSignal<Record<string, boolean>>({});
   const [hasExpandedRunningTasks, setHasExpandedRunningTasks] = createSignal(false);
   const [taskNameOverrides, setTaskNameOverrides] = createSignal<Record<string, string>>({});
-  const [mode, setMode] = createSignal<RightMode>({ kind: "new-environment" });
+  const [mode, setMode] = createSignal<RightMode>({ kind: "new-workspace" });
   const [tab, setTab] = createSignal<RightTab>("conversation");
   const [mobileMenuOpen, setMobileMenuOpen] = createSignal(false);
   const [isMobile, setIsMobile] = createSignal(false);
@@ -1310,6 +1386,19 @@ export default function Workspace() {
             <div class="text-xs text-amber-600 dark:text-amber-400">No connected slopagents.</div>
           </Show>
         </div>
+      </div>
+
+      <div class="mb-4">
+        <button
+          onClick={() => {
+            setMode({ kind: "new-workspace" });
+            setTab("conversation");
+            if (isMobile()) setMobileMenuOpen(false);
+          }}
+          class="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+        >
+          + New Workspace
+        </button>
       </div>
 
       <div class="mb-3 flex items-center justify-between">
@@ -1532,6 +1621,16 @@ export default function Workspace() {
                 hosts={hostIds()}
                 onCreated={(taskId) => {
                   refetchEnvironments();
+                  refetchTasks();
+                  setMode({ kind: "task", taskId });
+                  setTab("conversation");
+                }}
+              />
+            </Show>
+
+            <Show when={mode().kind === "new-workspace"}>
+              <NewWorkspacePane
+                onCreated={(taskId) => {
                   refetchTasks();
                   setMode({ kind: "task", taskId });
                   setTab("conversation");

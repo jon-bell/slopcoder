@@ -87,9 +87,10 @@ pub fn routes(
     let environments = warp::path("environments").and(environments_routes(state.clone()));
     let tasks = warp::path("tasks").and(tasks_routes(state.clone()));
     let secrets = warp::path("secrets").and(secrets_routes(state.clone()));
+    let workspaces = warp::path("workspaces").and(workspaces_routes(state.clone()));
 
     let api_scoped = auth_filter_api(state.clone())
-        .and(hosts.or(environments).or(tasks).or(secrets))
+        .and(hosts.or(environments).or(tasks).or(secrets).or(workspaces))
         .recover(handle_rejection);
     let api_routes = warp::path("api").and(api_scoped);
 
@@ -616,6 +617,7 @@ fn tasks_routes(
     let create = warp::path::end()
         .and(warp::post())
         .and(warp::body::json())
+        .and(warp::header::optional::<String>("cookie"))
         .and(with_state(state.clone()))
         .and_then(create_task);
 
@@ -877,7 +879,7 @@ struct RenameTaskRequest {
     name: String,
 }
 
-async fn create_task(req: CreateTaskRequest, state: AppState) -> Result<impl Reply, Infallible> {
+async fn create_task(req: CreateTaskRequest, cookie_header: Option<String>, state: AppState) -> Result<impl Reply, Infallible> {
     let host = req.host.trim();
     if host.is_empty() {
         return Ok(error_reply(StatusCode::BAD_REQUEST, "Host is required"));
@@ -886,6 +888,9 @@ async fn create_task(req: CreateTaskRequest, state: AppState) -> Result<impl Rep
         Ok(agent) => agent,
         Err(e) => return Ok(error_reply(state_error_status(&e), e.to_string())),
     };
+
+    let owner = extract_username_from_cookie(&cookie_header, state.jwt_secret())
+        .unwrap_or_default();
 
     let request = AgentCreateTaskRequest {
         environment: req.environment,
@@ -899,6 +904,34 @@ async fn create_task(req: CreateTaskRequest, state: AppState) -> Result<impl Rep
     match agent.request(AgentRequest::CreateTask { request }).await {
         Ok(AgentResponse::CreatedTask { id, worktree_path }) => {
             state.set_task_host(id, agent.host).await;
+
+            // Launch k8s workspace if available
+            if let Some(k8s_client) = state.k8s_client() {
+                let slug = format!("{}", id.0.simple());
+                let spec = crate::k8s::WorkspaceSpec {
+                    task_id: id.to_string(),
+                    slug: slug.clone(),
+                    owner: owner.clone(),
+                    image: state.agent_image().to_string(),
+                    http_port: 3000,
+                    repo_url: None,
+                };
+                if let Err(e) = k8s_client.create_workspace(&spec).await {
+                    tracing::error!("Failed to create k8s workspace for task {}: {}", id, e);
+                }
+                // Prep SSH keys configmap
+                match crate::k8s::fetch_github_ssh_keys(&owner).await {
+                    Ok(keys) => {
+                        if let Err(e) = k8s_client.create_ssh_keys_configmap(&owner, &keys).await {
+                            tracing::error!("Failed to create SSH keys configmap for {}: {}", owner, e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to fetch GitHub SSH keys for {}: {}", owner, e);
+                    }
+                }
+            }
+
             Ok(warp::reply::with_status(
                 warp::reply::json(&CreateTaskResponse {
                     id: id.to_string(),
@@ -1177,6 +1210,12 @@ async fn archive_task(id: String, state: AppState) -> Result<impl Reply, Infalli
     match agent.request(AgentRequest::ArchiveTask { task_id }).await {
         Ok(AgentResponse::ArchiveResult { status, message }) => {
             close_task_terminal_session(&state, &agent, task_id).await;
+            if let Some(k8s_client) = state.k8s_client() {
+                let slug = format!("{}", task_id.0.simple());
+                if let Err(e) = k8s_client.delete_workspace(&slug).await {
+                    tracing::error!("Failed to delete k8s workspace for task {}: {}", task_id, e);
+                }
+            }
             state.clear_task_host(task_id).await;
             Ok(warp::reply::with_status(
                 warp::reply::json(&serde_json::json!({ "status": status, "message": message })),
@@ -1221,6 +1260,12 @@ async fn delete_task(
     {
         Ok(AgentResponse::DeleteResult { status, message }) => {
             close_task_terminal_session(&state, &agent, task_id).await;
+            if let Some(k8s_client) = state.k8s_client() {
+                let slug = format!("{}", task_id.0.simple());
+                if let Err(e) = k8s_client.delete_workspace(&slug).await {
+                    tracing::error!("Failed to delete k8s workspace for task {}: {}", task_id, e);
+                }
+            }
             state.clear_task_host(task_id).await;
             Ok(warp::reply::with_status(
                 warp::reply::json(&serde_json::json!({ "status": status, "message": message })),
@@ -1342,6 +1387,146 @@ struct CreateSecretRequest {
 struct DeleteSecretQuery {
     #[serde(default)]
     environment: Option<String>,
+}
+
+// ============================================================================
+// Workspace routes (on-demand k8s workspace creation)
+// ============================================================================
+
+fn workspaces_routes(
+    state: AppState,
+) -> impl Filter<Extract = (impl Reply,), Error = warp::Rejection> + Clone {
+    warp::path::end()
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::header::optional::<String>("cookie"))
+        .and(with_state(state))
+        .and_then(create_workspace)
+}
+
+#[derive(Deserialize)]
+struct CreateWorkspaceRequest {
+    repo_url: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    agent: Option<slopcoder_core::anyagent::AgentKind>,
+    prompt: String,
+    #[serde(default)]
+    use_worktree: bool,
+}
+
+#[derive(Serialize)]
+struct CreateWorkspaceResponse {
+    workspace_slug: String,
+    task_id: String,
+    workspace_url: String,
+}
+
+async fn create_workspace(
+    req: CreateWorkspaceRequest,
+    cookie_header: Option<String>,
+    state: AppState,
+) -> Result<impl Reply, Infallible> {
+    let Some(owner) = extract_username_from_cookie(&cookie_header, state.jwt_secret()) else {
+        return Ok(error_reply(StatusCode::UNAUTHORIZED, "Not authenticated"));
+    };
+
+    let Some(k8s_client) = state.k8s_client() else {
+        return Ok(error_reply(StatusCode::SERVICE_UNAVAILABLE, "Not running in Kubernetes"));
+    };
+
+    // Generate slug from name or repo URL
+    let slug = {
+        let base = req.name.as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
+                req.repo_url.rsplit('/').next().unwrap_or("workspace")
+                    .trim_end_matches(".git")
+            });
+        let clean: String = base.chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+            .collect();
+        let suffix: String = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        format!("{}-{}", clean.trim_matches('-'), suffix)
+    };
+
+    let spec = crate::k8s::WorkspaceSpec {
+        task_id: slug.clone(),
+        slug: slug.clone(),
+        owner: owner.clone(),
+        image: state.agent_image().to_string(),
+        http_port: 3000,
+        repo_url: Some(req.repo_url.clone()),
+    };
+
+    if let Err(e) = k8s_client.create_workspace(&spec).await {
+        tracing::error!("Failed to create k8s workspace '{}': {}", slug, e);
+        return Ok(error_reply(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create workspace: {}", e)));
+    }
+
+    // Prep SSH keys (best-effort)
+    if let Ok(keys) = crate::k8s::fetch_github_ssh_keys(&owner).await {
+        let _ = k8s_client.create_ssh_keys_configmap(&owner, &keys).await;
+    }
+
+    // Wait for agent to connect (up to 120s)
+    let agent = match state.wait_for_agent(&slug, Duration::from_secs(120)).await {
+        Some(agent) => agent,
+        None => {
+            tracing::error!("Workspace '{}' agent did not connect within timeout", slug);
+            let _ = k8s_client.delete_workspace(&slug).await;
+            return Ok(error_reply(StatusCode::GATEWAY_TIMEOUT, "Workspace agent did not connect in time"));
+        }
+    };
+
+    // Wait for the agent to discover the cloned repo
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Discover the environment (cloned repo)
+    let environment = match agent.request(slopcoder_core::agent_rpc::AgentRequest::ListEnvironments).await {
+        Ok(slopcoder_core::agent_rpc::AgentResponse::Environments { environments }) => {
+            environments.into_iter().next().map(|e| e.name)
+        }
+        _ => None,
+    };
+
+    let Some(env_name) = environment else {
+        return Ok(error_reply(StatusCode::INTERNAL_SERVER_ERROR, "No environment discovered in workspace"));
+    };
+
+    // Create the task on the agent
+    let task_request = slopcoder_core::agent_rpc::AgentCreateTaskRequest {
+        environment: env_name,
+        name: req.name,
+        use_worktree: req.use_worktree,
+        web_search: false,
+        prompt: req.prompt,
+        agent: req.agent,
+    };
+
+    match agent.request(slopcoder_core::agent_rpc::AgentRequest::CreateTask { request: task_request }).await {
+        Ok(slopcoder_core::agent_rpc::AgentResponse::CreatedTask { id, .. }) => {
+            state.set_task_host(id, agent.host).await;
+            let workspace_url = format!("https://{}.work.ripley.cloud", slug);
+            Ok(warp::reply::with_status(
+                warp::reply::json(&CreateWorkspaceResponse {
+                    workspace_slug: slug,
+                    task_id: id.to_string(),
+                    workspace_url,
+                }),
+                StatusCode::CREATED,
+            ))
+        }
+        Ok(other) => {
+            tracing::error!("Unexpected response creating task on workspace '{}': {:?}", slug, other);
+            Ok(error_reply(StatusCode::INTERNAL_SERVER_ERROR, "Unexpected response from agent"))
+        }
+        Err(e) => {
+            tracing::error!("Failed to create task on workspace '{}': {}", slug, e);
+            Ok(error_reply(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create task: {}", e)))
+        }
+    }
 }
 
 fn extract_username_from_cookie(cookie_header: &Option<String>, jwt_secret: &str) -> Option<String> {

@@ -151,6 +151,8 @@ pub struct AppState {
     allowed_orgs: Vec<String>,
     allowed_teams: HashMap<String, Vec<String>>,
     max_workspaces_per_user: usize,
+    k8s_client: Option<crate::k8s::K8sClient>,
+    agent_image: String,
 }
 
 struct AppStateInner {
@@ -175,6 +177,8 @@ impl AppState {
         task_store: CoordinatorTaskStore,
         github_client_id: Option<String>,
         github_client_secret: Option<String>,
+        k8s_client: Option<crate::k8s::K8sClient>,
+        agent_image: String,
     ) -> Self {
         let jwt_secret = if dev_mode {
             "slopcoder-dev-mode-secret".to_string()
@@ -205,6 +209,8 @@ impl AppState {
             allowed_orgs: Vec::new(),
             allowed_teams: HashMap::new(),
             max_workspaces_per_user: 5,
+            k8s_client,
+            agent_image,
         }
     }
 
@@ -246,6 +252,14 @@ impl AppState {
 
     pub fn max_workspaces_per_user(&self) -> usize {
         self.max_workspaces_per_user
+    }
+
+    pub fn k8s_client(&self) -> &Option<crate::k8s::K8sClient> {
+        &self.k8s_client
+    }
+
+    pub fn agent_image(&self) -> &str {
+        &self.agent_image
     }
 
     /// Check if a user with the given orgs/teams is authorized.
@@ -356,6 +370,26 @@ impl AppState {
 
         for tx in channels_to_close {
             let _ = tx.send(TerminalEvent::Closed);
+        }
+    }
+
+    pub async fn find_agent_by_host(&self, host: &str) -> Option<ConnectedAgent> {
+        let inner = self.inner.read().await;
+        inner.host_to_id.get(host)
+            .and_then(|id| inner.agents_by_id.get(id))
+            .cloned()
+    }
+
+    pub async fn wait_for_agent(&self, host: &str, timeout: std::time::Duration) -> Option<ConnectedAgent> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(agent) = self.find_agent_by_host(host).await {
+                return Some(agent);
+            }
+            if start.elapsed() >= timeout {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
 
@@ -551,7 +585,7 @@ mod tests {
         let store = CoordinatorTaskStore::new(tmp.path().to_path_buf()).await.unwrap();
         // Leak the TempDir so it lives for the test duration
         std::mem::forget(tmp);
-        AppState::new(None, "test-password".to_string(), 15, false, store, None, None)
+        AppState::new(None, "test-password".to_string(), 15, false, store, None, None, None, "registry.work.ripley.cloud/slopcoder-agent:latest".to_string())
     }
 
     #[tokio::test]

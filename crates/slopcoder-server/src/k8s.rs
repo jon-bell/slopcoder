@@ -32,6 +32,7 @@ pub struct WorkspaceSpec {
     pub owner: String,
     pub image: String,
     pub http_port: u16,
+    pub repo_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,35 +90,45 @@ impl K8sClient {
                     name: "workspace".to_string(),
                     image: Some(spec.image.clone()),
                     command: Some(vec!["/usr/local/bin/workspace-init".to_string()]),
-                    env: Some(vec![
-                        EnvVar {
-                            name: "SLOPCODER_SERVER".to_string(),
-                            value: Some(format!("ws://slopcoder-server.{}.svc:8080/agent/connect", namespace)),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "SLOPCODER_AGENT_PASSWORD".to_string(),
-                            value_from: Some(EnvVarSource {
-                                secret_key_ref: Some(SecretKeySelector {
-                                    name: "slopcoder-internal".to_string(),
-                                    key: "agent-password".to_string(),
+                    env: Some({
+                        let mut env = vec![
+                            EnvVar {
+                                name: "SLOPCODER_SERVER".to_string(),
+                                value: Some(format!("ws://slopcoder-server.{}.svc:8080/agent/connect", namespace)),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "SLOPCODER_AGENT_PASSWORD".to_string(),
+                                value_from: Some(EnvVarSource {
+                                    secret_key_ref: Some(SecretKeySelector {
+                                        name: "slopcoder-internal".to_string(),
+                                        key: "agent-password".to_string(),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "GITHUB_USER".to_string(),
-                            value: Some(spec.owner.clone()),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "WORKSPACE_SLUG".to_string(),
-                            value: Some(spec.slug.clone()),
-                            ..Default::default()
-                        },
-                    ]),
+                            },
+                            EnvVar {
+                                name: "GITHUB_USER".to_string(),
+                                value: Some(spec.owner.clone()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "WORKSPACE_SLUG".to_string(),
+                                value: Some(spec.slug.clone()),
+                                ..Default::default()
+                            },
+                        ];
+                        if let Some(ref url) = spec.repo_url {
+                            env.push(EnvVar {
+                                name: "GIT_CLONE_URL".to_string(),
+                                value: Some(url.clone()),
+                                ..Default::default()
+                            });
+                        }
+                        env
+                    }),
                     ports: Some(vec![
                         ContainerPort { container_port: 8080, name: Some("code-server".to_string()), ..Default::default() },
                         ContainerPort { container_port: 22, name: Some("ssh".to_string()), ..Default::default() },
@@ -146,6 +157,15 @@ impl K8sClient {
                         ])),
                         ..Default::default()
                     }),
+                    readiness_probe: Some(k8s_openapi::api::core::v1::Probe {
+                        tcp_socket: Some(k8s_openapi::api::core::v1::TCPSocketAction {
+                            port: k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(8080),
+                            ..Default::default()
+                        }),
+                        initial_delay_seconds: Some(5),
+                        period_seconds: Some(5),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }],
                 volumes: Some(vec![
@@ -165,6 +185,11 @@ impl K8sClient {
                             ..Default::default()
                         }),
                         ..Default::default()
+                    },
+                ]),
+                image_pull_secrets: Some(vec![
+                    k8s_openapi::api::core::v1::LocalObjectReference {
+                        name: "registry-creds".to_string(),
                     },
                 ]),
                 ..Default::default()
@@ -281,6 +306,7 @@ mod tests {
             owner: "alice".to_string(),
             image: "ghcr.io/org/slopcoder-agent:latest".to_string(),
             http_port: 3000,
+            repo_url: Some("https://github.com/org/repo.git".to_string()),
         };
         let pod = K8sClient::workspace_pod_spec(&spec, "slopcoder");
         let meta = pod.metadata;
@@ -293,7 +319,14 @@ mod tests {
         let container = &pod.spec.unwrap().containers[0];
         assert_eq!(container.image.as_deref(), Some("ghcr.io/org/slopcoder-agent:latest"));
         assert_eq!(container.ports.as_ref().unwrap().len(), 2);
-        assert_eq!(container.env.as_ref().unwrap().len(), 4);
+        assert_eq!(container.env.as_ref().unwrap().len(), 5);
+        let env_map: HashMap<String, Option<String>> = container.env.as_ref().unwrap().iter().map(|e| (e.name.clone(), e.value.clone())).collect();
+        assert_eq!(env_map["GIT_CLONE_URL"], Some("https://github.com/org/repo.git".to_string()));
+        assert!(container.readiness_probe.is_some(), "readiness probe should be set");
+        let probe = container.readiness_probe.as_ref().unwrap();
+        assert!(probe.tcp_socket.is_some());
+        assert_eq!(probe.initial_delay_seconds, Some(5));
+        assert_eq!(probe.period_seconds, Some(5));
     }
 
     #[test]
@@ -304,12 +337,15 @@ mod tests {
             owner: "bob".to_string(),
             image: "img:latest".to_string(),
             http_port: 5173,
+            repo_url: Some("https://github.com/org/repo.git".to_string()),
         };
         let pod = K8sClient::workspace_pod_spec(&spec, "ns");
         let envs = pod.spec.unwrap().containers[0].env.as_ref().unwrap().clone();
+        assert_eq!(envs.len(), 5);
         let env_map: HashMap<String, Option<String>> = envs.into_iter().map(|e| (e.name, e.value)).collect();
         assert_eq!(env_map["GITHUB_USER"], Some("bob".to_string()));
         assert_eq!(env_map["WORKSPACE_SLUG"], Some("my-ws".to_string()));
         assert!(env_map["SLOPCODER_SERVER"].as_ref().unwrap().contains("ns.svc"));
+        assert_eq!(env_map["GIT_CLONE_URL"], Some("https://github.com/org/repo.git".to_string()));
     }
 }

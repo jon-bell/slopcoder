@@ -181,6 +181,10 @@ async fn main() {
         }
     }
 
+    let k8s_client = crate::k8s::K8sClient::try_new().await;
+    let agent_image = std::env::var("SLOPCODER_AGENT_IMAGE")
+        .unwrap_or_else(|_| "registry.work.ripley.cloud/slopcoder-agent:latest".to_string());
+
     let mut state = AppState::new(
         ui_auth_password,
         agent_auth_password,
@@ -189,6 +193,8 @@ async fn main() {
         task_store,
         cli.github_client_id,
         cli.github_client_secret,
+        k8s_client,
+        agent_image,
     );
 
     // Authorization config from env vars
